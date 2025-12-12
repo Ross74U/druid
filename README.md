@@ -4,7 +4,7 @@ Druid, although retired, is used by
 linux input methods, so this fork is just a rather hacky solution to that.
 
 No, I did not implement proper platform text handling for gtk. This was accomplished by hacking
-on a few generic traits only the gtk backend will use for handling gtk ime_preedit and ime_commit. 
+on a few traits methods only the gtk backend will use for handling gtk ime_preedit and ime_commit. 
 None-IME text input is still simulated.
  
 # Original Druid Readme
