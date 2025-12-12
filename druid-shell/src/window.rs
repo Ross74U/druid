@@ -162,6 +162,9 @@ pub enum WindowState {
 pub struct WindowHandle(pub(crate) backend::WindowHandle);
 
 impl WindowHandle {
+    pub fn set_ime_cursor_rect(&self, rect_dp: Rect) {
+        self.0.set_ime_cursor_rect(rect_dp)
+    }
     /// Make this window visible.
     pub fn show(&self) {
         self.0.show()
@@ -289,7 +292,7 @@ impl WindowHandle {
     /// This should be considered a request to the platform to set the size of the window.  The
     /// platform might choose a different size depending on its DPI or other platform-dependent
     /// configuration.  To know the actual size of the window you should handle the
-    /// [`WinHandler::size`] method.
+    /// [`ninHandler::size`] method.
     ///
     /// [display points]: crate::Scale
     pub fn set_size(&self, size: impl Into<Size>) {
@@ -564,6 +567,9 @@ impl WindowBuilder {
 /// recursively; implementers are expected to use `RefCell` or the like,
 /// but should be careful to keep the lifetime of the borrow short.
 pub trait WinHandler {
+    #[allow(unused_variables)]
+    fn set_window_handle(&mut self, window_handle: WindowHandle) {}
+
     /// Provide the handler with a handle to the window so that it can
     /// invalidate or make other requests.
     ///
@@ -734,8 +740,27 @@ pub trait WinHandler {
     #[allow(unused_variables)]
     fn idle(&mut self, token: IdleToken) {}
 
+
     /// Get a reference to the handler state. Used mostly by idle handlers.
     fn as_any(&mut self) -> &mut dyn Any;
+
+    /// Called when the platform text input (IME) commits a string of text.
+    ///
+    /// By default, this does nothing. Applications that use text input
+    /// (for example via the `text` module and `TextFieldToken`) should
+    /// override this method and insert the committed text into the
+    /// appropriate text field.
+    ///
+    /// The `active` argument is the currently active text field token,
+    /// if any, as tracked by the platform backend.
+    #[allow(unused_variables)]
+    fn ime_commit(&mut self, active: Option<TextFieldToken>, text: String) {}
+
+    #[allow(unused_variables)]
+    fn ime_preedit(&mut self, active: Option<TextFieldToken>) {}
+
+    #[allow(unused_variables)]
+    fn update_caret_rect(&mut self, active: Option<TextFieldToken>) {}
 }
 
 impl From<backend::WindowHandle> for WindowHandle {

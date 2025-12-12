@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! GTK window creation and management.
-
+//!
 use std::cell::{Cell, RefCell};
 use std::convert::TryInto;
 use std::ffi::c_void;
@@ -19,7 +19,8 @@ use gtk::glib::source::Continue;
 use gtk::glib::translate::FromGlib;
 use gtk::prelude::*;
 use gtk::traits::SettingsExt;
-use gtk::{AccelGroup, ApplicationWindow, DrawingArea};
+use gtk::{AccelGroup, ApplicationWindow, DrawingArea, IMMulticontext};
+use gtk::prelude::IMContextExt;
 
 use gdk_sys::GdkKeymapKey;
 
@@ -195,6 +196,11 @@ pub(crate) struct WindowState {
     in_draw: Cell<bool>,
 
     parent: Option<crate::WindowHandle>,
+
+    pub(crate) im_context: IMMulticontext,
+    pub(crate) im_preedit_text: Option<String>,
+    pub(crate) im_preedit_cursor: Option<usize>,
+    pub(crate) im_preedit_anchor: usize
 }
 
 impl std::fmt::Debug for WindowState {
@@ -311,6 +317,31 @@ impl WindowBuilder {
         window.add(&vbox);
         let drawing_area = gtk::DrawingArea::new();
 
+        let im_context = IMMulticontext::new();
+
+        // Attach IME to the GdkWindow once realized
+        {
+            let im_context_clone = im_context.clone();
+            window.connect_realize(move |w| {
+                if let Some(gdk_win) = w.window() {
+                    im_context_clone.set_client_window(Some(&gdk_win));
+                }
+            });
+        }
+        // Also let IME know about focus
+        {
+            let im_context_clone = im_context.clone();
+            window.connect_focus_in_event(move |_, _| {
+                im_context_clone.focus_in();
+                Inhibit(false)
+            });
+            let im_context_clone = im_context.clone();
+            window.connect_focus_out_event(move |_, _| {
+                im_context_clone.focus_out();
+                Inhibit(false)
+            });
+        }
+
         // Set the parent widget and handle level specific code
         let mut parent: Option<crate::WindowHandle> = None;
         if let Some(level) = &self.level {
@@ -364,6 +395,10 @@ impl WindowBuilder {
             request_animation: Cell::new(false),
             in_draw: Cell::new(false),
             parent,
+            im_context,
+    				im_preedit_text: None,
+    				im_preedit_cursor: None,
+    				im_preedit_anchor: 0,
         };
 
         let win_state = Arc::new(state);
@@ -407,6 +442,7 @@ impl WindowBuilder {
                 | EventMask::SMOOTH_SCROLL_MASK
                 | EventMask::FOCUS_CHANGE_MASK,
         );
+
 
         win_state.drawing_area.set_can_focus(true);
         win_state.drawing_area.grab_focus();
@@ -706,13 +742,20 @@ impl WindowBuilder {
             .connect_key_press_event(clone!(handle => move |_widget, key| {
                 if let Some(state) = handle.state.upgrade() {
 
+                    let handled_by_ime = state.im_context.filter_keypress(key);
+
+                    if handled_by_ime {
+                        return Inhibit(true);
+                    }
                     let hw_keycode = key.hardware_keycode();
                     let repeat = state.current_keycode.get() == Some(hw_keycode);
 
                     state.current_keycode.set(Some(hw_keycode));
 
-                    state.with_handler(|h|
+                    state.with_handler(|h| {
+                        h.update_caret_rect(state.active_text_input.get()); // update rect anyway
                         simulate_input(h, state.active_text_input.get(), make_key_event(key, repeat, KeyState::Down))
+                    }
                     );
                 }
 
@@ -774,6 +817,22 @@ impl WindowBuilder {
                 }
             }));
 
+        let handle_clone = handle.clone(); // make sure WindowHandle: Clone
+        let win_state_weak = Arc::downgrade(&win_state);
+        win_state.im_context.connect_commit(move |_, text| {
+            let text = text.to_string();
+            // Get the currently active text field token from WindowState.
+            let active = win_state_weak
+                .upgrade()
+                .and_then(|s| s.active_text_input.get());
+
+            if let Some(idle) = handle_clone.get_idle_handle() {
+                idle.add_idle_callback(move |handler: &mut dyn WinHandler| {
+                    handler.ime_commit(active, text);
+                });
+            }
+        });
+
         vbox.pack_end(&win_state.drawing_area, true, true, 0);
         win_state.drawing_area.realize();
         win_state
@@ -799,11 +858,16 @@ impl WindowBuilder {
             h.size(size);
         });
 
+        win_state.with_handler(|h| {
+            h.set_window_handle(window::WindowHandle(handle.clone()));
+        });
+
         Ok(handle)
     }
 }
 
 impl WindowState {
+
     #[track_caller]
     fn with_handler<T, F: FnOnce(&mut dyn WinHandler) -> T>(&self, f: F) -> Option<T> {
         if self.invalid.try_borrow_mut().is_err() || self.surface.try_borrow_mut().is_err() {
@@ -1204,8 +1268,12 @@ impl WindowHandle {
         }
     }
 
-    pub fn update_text_field(&self, _token: TextFieldToken, _update: Event) {
-        // noop until we get a real text input implementation
+    pub fn update_text_field(&self, token: TextFieldToken, _update: Event) {
+        if let Some(idle) = self.get_idle_handle() {
+            idle.add_idle_callback(move |handler: &mut dyn WinHandler| {
+                handler.update_caret_rect(Some(token));
+            });
+        }
     }
 
     pub fn request_timer(&self, deadline: Instant) -> TimerToken {
@@ -1262,6 +1330,23 @@ impl WindowHandle {
             }
         } else {
             None
+        }
+    }
+
+    pub fn set_ime_cursor_rect(&self, rect_dp: Rect) {
+        if let Some(state) = self.state.upgrade() {
+            use gtk::gdk::Rectangle;
+            use gtk::prelude::IMContextExt;
+
+            let scale = state.scale.get().x(); // DP → px
+
+            let x = (rect_dp.x0 * scale).round() as i32;
+            let y = (rect_dp.y0 * scale).round() as i32;
+            let w = (rect_dp.width() * scale).round() as i32;
+            let h = (rect_dp.height() * scale).round() as i32;
+
+            let gdk_rect = Rectangle::new(x, y, w, h);
+            state.im_context.set_cursor_location(&gdk_rect);
         }
     }
 
@@ -1333,6 +1418,8 @@ impl WindowHandle {
             state.window.set_title(&(title.into()));
         }
     }
+
+
 }
 
 // WindowState needs to be Send + Sync so it can be passed into glib closures.

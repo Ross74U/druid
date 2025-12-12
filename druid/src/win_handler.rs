@@ -8,6 +8,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+use crate::platform_menus::win;
+use crate::Rect;
 use crate::kurbo::Size;
 use crate::piet::Piet;
 use crate::shell::{
@@ -27,7 +29,9 @@ use crate::{
 
 use crate::app::{PendingWindow, WindowConfig};
 use crate::command::sys as sys_cmd;
-use druid_shell::WindowBuilder;
+use druid_shell::{WindowBuilder, text::Selection};
+
+
 
 pub(crate) const RUN_COMMANDS_TOKEN: IdleToken = IdleToken::new(1);
 
@@ -43,6 +47,7 @@ pub(crate) const EXT_EVENT_IDLE_TOKEN: IdleToken = IdleToken::new(2);
 pub struct DruidHandler<T> {
     /// The shared app state.
     pub(crate) app_state: AppState<T>,
+    pub(crate) window_handle: Option<WindowHandle>,
     /// The id for the current window.
     window_id: WindowId,
 }
@@ -541,8 +546,10 @@ impl<T: Data> DruidHandler<T> {
         DruidHandler {
             app_state,
             window_id,
+            window_handle: None
         }
     }
+
 }
 
 impl<T: Data> AppState<T> {
@@ -933,6 +940,10 @@ impl<T: Data> crate::shell::AppHandler for AppHandler<T> {
 }
 
 impl<T: Data> WinHandler for DruidHandler<T> {
+    fn set_window_handle(&mut self, window_handle: WindowHandle) {
+        self.window_handle = Some(window_handle); 
+    }
+
     fn connect(&mut self, handle: &WindowHandle) {
         self.app_state
             .connect_window(self.window_id, handle.clone());
@@ -1050,6 +1061,84 @@ impl<T: Data> WinHandler for DruidHandler<T> {
         self.app_state.release_ime_lock(self.window_id, token);
     }
 
+    fn ime_commit(&mut self, active: Option<TextFieldToken>, text: String) {
+        let Some(token) = active else {
+            return;
+        };
+
+        let mut handler = self.acquire_input_lock(token, true);
+
+        let sel = handler.selection();
+        let start = sel.min();
+        let end = sel.max();
+
+        // 1. Decide what range this commit should replace.
+        let range = if let Some(comp) = handler.composition_range() {
+            // Active IME composition → replace it.
+            comp
+        } else if start != end {
+            // Non-empty selection → replace the highlighted text.
+            start..end
+        } else {
+            // No composition, no selection → insert at caret.
+            let caret = sel.max();
+            caret..caret
+        };
+
+        tracing::trace!(
+            "IME commit: text={:?}, replace_range={:?}, selection_before={:?}, comp_before={:?}",
+            text,
+            range,
+            handler.selection(),
+            handler.composition_range(),
+        );
+
+        // 2. Clear composition explicitly (IME has finalized that segment).
+        handler.set_composition_range(None);
+
+        // 3. Perform the replacement.
+        handler.replace_range(range.clone(), &text);
+
+        // 4. Manually set caret to the end of the inserted text
+        //    (important for multi-character commits).
+        //
+        // Indices are in UTF-8 bytes in druid's text system, so this matches range units.
+        let inserted_len = text.len();
+        let caret = range.start + inserted_len;
+        let new_sel = Selection::new(caret, caret);
+        handler.set_selection(new_sel);
+
+        tracing::trace!(
+            "IME commit after replacement: selection={:?}, comp={:?}, len={}",
+            handler.selection(),
+            handler.composition_range(),
+            handler.len(),
+        );
+
+        if let Some(rect_dp) = ime_cursor_rect(handler) {
+            if let Some(h) = self.window_handle.clone() {
+                h.set_ime_cursor_rect(rect_dp);
+            }
+        }
+        self.release_input_lock(token);
+    }
+
+    fn ime_preedit(&mut self, active: Option<TextFieldToken>) {
+        // TODO
+    }
+
+    fn update_caret_rect(&mut self, active: Option<TextFieldToken>) { 
+        let Some(token) = active else { return };
+        let handler = self.acquire_input_lock(token, true);
+        if let Some(rect_dp) = ime_cursor_rect(handler) {
+            if let Some(h) = self.window_handle.clone() {
+                h.set_ime_cursor_rect(rect_dp);
+            }
+        }
+        self.release_input_lock(token);
+    }
+    
+
     fn request_close(&mut self) {
         self.app_state
             .handle_cmd(sys_cmd::CLOSE_WINDOW.to(self.window_id));
@@ -1060,7 +1149,20 @@ impl<T: Data> WinHandler for DruidHandler<T> {
     fn destroy(&mut self) {
         self.app_state.remove_window(self.window_id);
     }
+
 }
+// helper function to determin cursor rect
+fn ime_cursor_rect(h: Box<dyn InputHandler>) -> Option<Rect> {
+    let sel = h.selection();
+    let pos = sel.active;
+    if pos <= h.len() {
+        let rect = h.slice_bounding_box(pos..pos)?;
+        Some(rect)
+    } else {
+        None
+    }
+}
+
 
 impl<T> Default for Windows<T> {
     fn default() -> Self {
