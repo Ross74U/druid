@@ -757,7 +757,7 @@ pub trait WinHandler {
     fn ime_commit(&mut self, active: Option<TextFieldToken>, text: String) {}
 
     #[allow(unused_variables)]
-    fn ime_preedit(&mut self, active: Option<TextFieldToken>) {}
+    fn ime_preedit(&mut self, active: Option<TextFieldToken>, text: String) {}
 
     #[allow(unused_variables)]
     fn update_caret_rect(&mut self, active: Option<TextFieldToken>) {}

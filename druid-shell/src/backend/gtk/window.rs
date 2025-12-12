@@ -833,6 +833,21 @@ impl WindowBuilder {
             }
         });
 
+        let handle_clone = handle.clone(); // make sure WindowHandle: Clone
+        let win_state_weak = Arc::downgrade(&win_state);
+        win_state.im_context.connect_preedit_changed(move |ctx| {
+            let (text, _, _) = ctx.preedit_string(); 
+            let active = win_state_weak
+                .upgrade()
+                .and_then(|s| s.active_text_input.get());
+
+            if let Some(idle) = handle_clone.get_idle_handle() {
+                idle.add_idle_callback(move |handler: &mut dyn WinHandler| {
+                    handler.ime_preedit(active, text.to_string());
+                });
+            }
+        });
+
         vbox.pack_end(&win_state.drawing_area, true, true, 0);
         win_state.drawing_area.realize();
         win_state

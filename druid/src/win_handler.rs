@@ -8,7 +8,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use crate::platform_menus::win;
 use crate::Rect;
 use crate::kurbo::Size;
 use crate::piet::Piet;
@@ -1072,9 +1071,7 @@ impl<T: Data> WinHandler for DruidHandler<T> {
         let start = sel.min();
         let end = sel.max();
 
-        // 1. Decide what range this commit should replace.
         let range = if let Some(comp) = handler.composition_range() {
-            // Active IME composition → replace it.
             comp
         } else if start != end {
             // Non-empty selection → replace the highlighted text.
@@ -1085,36 +1082,73 @@ impl<T: Data> WinHandler for DruidHandler<T> {
             caret..caret
         };
 
-        tracing::trace!(
-            "IME commit: text={:?}, replace_range={:?}, selection_before={:?}, comp_before={:?}",
-            text,
-            range,
-            handler.selection(),
-            handler.composition_range(),
-        );
-
-        // 2. Clear composition explicitly (IME has finalized that segment).
         handler.set_composition_range(None);
-
-        // 3. Perform the replacement.
         handler.replace_range(range.clone(), &text);
 
-        // 4. Manually set caret to the end of the inserted text
-        //    (important for multi-character commits).
-        //
-        // Indices are in UTF-8 bytes in druid's text system, so this matches range units.
         let inserted_len = text.len();
         let caret = range.start + inserted_len;
         let new_sel = Selection::new(caret, caret);
         handler.set_selection(new_sel);
 
-        tracing::trace!(
-            "IME commit after replacement: selection={:?}, comp={:?}, len={}",
-            handler.selection(),
-            handler.composition_range(),
-            handler.len(),
-        );
+        // Update IME rect
+        // TODO: should switch to an idle caret updater
+        if let Some(rect_dp) = ime_cursor_rect(handler) {
+            if let Some(h) = self.window_handle.clone() {
+                h.set_ime_cursor_rect(rect_dp);
+            }
+        }
 
+        self.release_input_lock(token);
+    }
+
+    fn ime_preedit(&mut self, active: Option<TextFieldToken>, text: String) {
+        let Some(token) = active else {
+            return;
+        };
+        let is_clear = text.is_empty();
+        let mut handler = self.acquire_input_lock(token, true);
+
+        let sel = handler.selection();
+        let start = sel.min();
+        let end = sel.max();
+
+        let current_comp = handler.composition_range();
+
+        if is_clear {
+            handler.set_composition_range(None);
+            self.release_input_lock(token);
+            return;
+        }
+        let comp_range = if let Some(comp) = current_comp {
+            // There is already a composition active: update it in-place.
+            // Replace the existing composition range with the new preedit text.
+            handler.replace_range(comp.clone(), &text);
+            let new_end = comp.start + text.len();
+            comp.start..new_end
+        } else if start != end {
+            // No existing composition, but we have a non-empty selection:
+            // replace that selection with preedit and treat it as composition.
+            handler.replace_range(start..end, &text);
+            let new_end = start + text.len();
+            start..new_end
+        } else {
+            // No existing composition, no selection: insert preedit at caret.
+            let caret = sel.max();
+            handler.replace_range(caret..caret, &text);
+            let new_end = caret + text.len();
+            caret..new_end
+        };
+
+        // Mark this range as the active composition.
+        handler.set_composition_range(Some(comp_range.clone()));
+
+        // Move caret to end of the composition range.
+        let caret = comp_range.end;
+        let new_sel = Selection::new(caret, caret);
+        handler.set_selection(new_sel);
+
+        // Update IME rect
+        // TODO: should switch to an idle caret updater
         if let Some(rect_dp) = ime_cursor_rect(handler) {
             if let Some(h) = self.window_handle.clone() {
                 h.set_ime_cursor_rect(rect_dp);
@@ -1123,10 +1157,8 @@ impl<T: Data> WinHandler for DruidHandler<T> {
         self.release_input_lock(token);
     }
 
-    fn ime_preedit(&mut self, active: Option<TextFieldToken>) {
-        // TODO
-    }
-
+    // idle update ime rect, used only by update_text_input for switching focus_change
+    // TODO: uniform gtk API
     fn update_caret_rect(&mut self, active: Option<TextFieldToken>) { 
         let Some(token) = active else { return };
         let handler = self.acquire_input_lock(token, true);
@@ -1153,16 +1185,10 @@ impl<T: Data> WinHandler for DruidHandler<T> {
 }
 // helper function to determin cursor rect
 fn ime_cursor_rect(h: Box<dyn InputHandler>) -> Option<Rect> {
-    let sel = h.selection();
-    let pos = sel.active;
-    if pos <= h.len() {
-        let rect = h.slice_bounding_box(pos..pos)?;
-        Some(rect)
-    } else {
-        None
-    }
+    let pos = h.selection().active;
+    let rect = h.slice_bounding_box(pos..pos)?;
+    Some(rect)
 }
-
 
 impl<T> Default for Windows<T> {
     fn default() -> Self {
