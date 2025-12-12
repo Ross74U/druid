@@ -1,3 +1,14 @@
+# Why this fork
+Druid, although retired, is used by 
+[psst (My Fork)](https://github.com/Ross74U/psst). For my fork, I needed it to supported
+linux input methods, so this fork is just a rather hacky solution to that.
+
+No, I did not implement proper platform text handling for gtk. This was accomplished by hacking
+on a few generic traits only the gtk backend will use for handling gtk ime_preedit and ime_commit. 
+None-IME text input is still simulated.
+ 
+# Original Druid Readme
+
 ![druid banner](https://raw.githubusercontent.com/linebender/druid/screenshots/images/small_banner.png)
 
 ## A data-first Rust-native UI toolkit.
